@@ -5464,6 +5464,7 @@ def _usage_snapshot_uncached(realm=None, since=None, until=None):
         "expires_at": (rep.expires_at if rep else 0),
         "accounts": (len(POOL.accounts) if POOL else 0),
         "accounts_ready": (POOL.count_ready() if POOL else 0),
+        "free_model_credit_fallback": wb_settings.free_model_credit_fallback(ACCOUNTS_DIR),
     }
     return snap
 def _tail_lines(path, max_lines, chunk=256 * 1024):
@@ -16313,8 +16314,21 @@ def schedule_window_probe(account, model, reset_at, cap=False, cap_at=0.0):
         return False
 
 
+_FREE_MODEL_CREDIT_FALLBACKS = {
+    ("intl", "deepseek-v4.1-flash"): "deepseek-v4.1-flash-sg",
+}
+
+
+def _free_model_credit_fallback_enabled():
+    if wb_settings.free_model_credit_fallback(ACCOUNTS_DIR):
+        return True
+    return os.environ.get("WB_ENABLE_FREE_MODEL_CREDIT_FALLBACK", "0").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
 def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=None,
                   allow_product_switch=True,
+                  allow_credit_fallback=True,
                   pin_account=None, defer_egress_success=False,
                   allowed_accounts=None):
     # Refresh the daily guards before picking. The scan underneath is
@@ -16948,6 +16962,30 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
     if slot_held is not None:
         account_slot_release(slot_held)
         slot_held = None
+    # Only spend credits after every enabled, credential-bearing account in
+    # this realm has a persisted upstream 6004 cap for this free model. The
+    # switch is opt-in because the retry can incur real charges.
+    paid_model = _FREE_MODEL_CREDIT_FALLBACKS.get((realm, model))
+    eligible = ([a for a in POOL.accounts
+                 if a.realm == realm and a.enabled and a.access_token
+                 and (allowed_accounts is None or a.uid in allowed_accounts)]
+                if POOL else [])
+    if (allow_credit_fallback and paid_model and _free_model_credit_fallback_enabled()
+            and eligible and all(a.cap_until(model) > time.time() for a in eligible)):
+        paid_payload = dict(payload)
+        paid_payload["model"] = paid_model
+        log("free model '%s' exhausted on all %d %s account(s); retrying paid model '%s'"
+            % (model, len(eligible), realm, paid_model))
+        response, account, effort = open_upstream(
+            paid_payload, session_key=session_key, target_realm=realm,
+            allow_credit_fallback=False, allow_product_switch=False,
+            **({"allowed_accounts": allowed_accounts}
+               if allowed_accounts is not None else {}))
+        try:
+            response._wb_billed_model = paid_model
+        except Exception:
+            pass
+        return response, account, effort
     if last_error is not None:
         # Carry the account that produced the failure out to the caller, so
         # the error row can name it even though the local variable that would
@@ -22695,6 +22733,14 @@ class Handler(BaseHTTPRequestHandler):
                 apply_daily_guards(refresh=True)
             if "expiring_window_days" in touched and POOL:
                 POOL.apply_expiring_window()
+
+        if "free_model_credit_fallback" in payload:
+            raw = payload.get("free_model_credit_fallback")
+            if not isinstance(raw, bool):
+                return self._error(400, "free_model_credit_fallback must be true or false",
+                                   "invalid_request_error")
+            wb_settings.set_free_model_credit_fallback(ACCOUNTS_DIR, raw)
+            reply["free_model_credit_fallback"] = raw
 
         if "pricing_enabled" in payload:
             raw = payload.get("pricing_enabled")

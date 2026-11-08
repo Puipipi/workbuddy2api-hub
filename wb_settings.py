@@ -3378,3 +3378,18 @@ class PanelSessions(object):
     def revoke_all(self):
         with self._lock:
             self._tokens.clear()
+
+
+def free_model_credit_fallback(accounts_dir):
+    """Whether exhausted free models can fall back to credit siblings."""
+    return load(accounts_dir).get("free_model_credit_fallback") is True
+
+
+def set_free_model_credit_fallback(accounts_dir, enabled):
+    """Persist the free model credit fallback toggle. Returns the stored boolean."""
+    enabled = bool(enabled)
+    with _lock:
+        data = load(accounts_dir)
+        data["free_model_credit_fallback"] = enabled
+        save(accounts_dir, data)
+    return enabled
