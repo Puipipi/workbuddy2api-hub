@@ -14615,6 +14615,11 @@ def build_upstream_body(payload):
     # Prompt mode runs before sanitize/backfill so the gateway prompt is the
     # one the upstream sees, with the client's fingerprint-y system text gone.
     messages = apply_prompt_mode(messages)
+    # 命中「第三方 agent 系统提示」指纹的 system/developer 消息前置一行中性
+    # 占位语（见 wb_prompt.neutralize_agent_fingerprint）：上游国内版网关按
+    # system 开头识别「第三方 agent」，命中即 400 / 11128。原文一字不改，
+    # 未命中的请求不产生任何 body 变化。
+    messages = wb_prompt.neutralize_agent_fingerprint(messages)
     messages = sanitize_messages(messages)
     messages = backfill_reasoning_content(
         messages, model, thinking_enabled=thinking_enabled

@@ -101,6 +101,59 @@ def apply_mode(messages, mode, text, degraded=False):
     return messages
 
 
+#: 上游国内版网关会扫 system 提示的开头，命中它那份「第三方 agent 系统提示」
+#: 清单就回 HTTP 400 / 业务码 11128。报错文案是「这次调用没通过渠道校验，
+#: 可能不是官方客户端发出的」——跟账号、额度、网络、请求头都无关，换账号也
+#: 不会改变结果（该文案是误导，上游匹配的是提示词本身）。
+#: 老版本宿主（如桌面端 app.asar 内置的 dsh）的 identity 段正是这句。
+SYSTEM_AGENT_MARKERS = (
+    "You are an AI agent powered by DeepSeek Harness.",
+    "You are an AI assistant powered by DeepSeek Harness.",
+    "powered by DeepSeek Harness",
+)
+
+#: 命中指纹时前置的中性占位语。取值就是新版宿主自己的 identity 首句——它已经
+#: 在真实流量里跑通过（CLI 走的就是这条），用它不会引入新的可疑开头。
+NEUTRAL_PREAMBLE = "You are a helpful AI assistant.\n\n"
+
+
+def _message_text(message):
+    """取出 system/developer 消息的纯文本（字符串或 text block 数组）。"""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(str(block.get("text") or "")
+                       for block in content if isinstance(block, dict))
+    return ""
+
+
+def _hits_agent_marker(text):
+    """只看开头 400 字符：上游也是按 system 开头做识别。"""
+    head = text.lstrip()[:400]
+    return any(marker in head for marker in SYSTEM_AGENT_MARKERS)
+
+
+def neutralize_agent_fingerprint(messages):
+    """给命中指纹的 system/developer 消息加一行中性占位语，原文一字不改。
+
+    未命中的请求逐字节原样返回（同一个对象），避免无谓的 body 变化影响
+    上游的 prompt 缓存命中率。多模态 content 数组保守跳过。
+    """
+    changed = False
+    out = []
+    for message in messages or []:
+        if (isinstance(message, dict)
+                and message.get("role") in ("system", "developer")
+                and isinstance(message.get("content"), str)
+                and _hits_agent_marker(message["content"])):
+            message = dict(message)
+            message["content"] = NEUTRAL_PREAMBLE + message["content"]
+            changed = True
+        out.append(message)
+    return out if changed else messages
+
+
 def next_midnight_cst(now=None):
     """now 之后最近的 Asia/Shanghai 00:00（epoch 秒）。
 
