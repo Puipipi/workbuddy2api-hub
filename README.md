@@ -227,6 +227,7 @@ python tests/run_all.py realm      # 只跑名字里含 realm 的
 
 ### Unreleased
 
+- **中和「第三方 agent 系统提示」指纹，规避上游 400/11128**：上游国内版网关会扫描 `system` 消息开头，命中它维护的「第三方 agent 系统提示」清单时返回 HTTP 400 / 业务码 11128，文案是「这次调用没通过渠道校验，可能不是官方客户端发出的」——实际匹配的是**提示词文本本身**，与账号、额度、网络、请求头都无关，换账号不会改变结果。老版本宿主（桌面端 `app.asar` 内置的 dsh）identity 段正是 `You are an AI agent powered by DeepSeek Harness.`，因此每轮都被拦。现在命中该指纹的 system/developer 消息会在内容前**前置一行中性占位语**（`You are a helpful AI assistant.`，即新版宿主自己的 identity 首句），原文一字不改；未命中的请求逐字节原样返回，不影响上游 prompt 缓存命中率。The upstream CN gateway blocks requests whose `system` head matches its third-party-agent prompt list with HTTP 400 / code 11128. The display text blames the channel, but the match is on the prompt text itself, so account rotation does not help. Matching messages now get one neutral placeholder line prepended, leaving the original text untouched; non-matching requests are returned byte-identical.
 - **手机端账号区三处布局修正**：批量操作那组 6 个按钮一行摆不下时会被压成竖排单字，窄屏改为两列网格（3 行 2 列），文字保持横排；账号卡第一行原来塞了昵称、备注、分组、任务开关、版本、状态、账户类型，长昵称时整行顶出卡片，现在任务开关与版本 / 状态 / 类型收到第二行单独显示；操作区两层 flex 容器各自换行时「出站身份」会整块另起一行、中间空出一段，两行容器改为 `display:contents` 拆平，按钮按顺序自然流动（「导出」紧跟「同步昵称」，「删除」排在出站身份之后）。以上都只在 ≤640px 生效，桌面布局不变。
 - **请求到达即记日志（`chat head`）**：聊天日志行要等请求体收完才写，上传慢的请求在那段窗口里一行痕迹都没有，看起来像「对话卡住」，也分不清「上传慢」与「请求没到本进程」。现在 `do_POST` 在模型路由的请求头到达时先记一条 `chat head`（带 `content_length` 与 key），配合 `body_wait` 能直接区分两者。只覆盖对话真正使用的路由，面板轮询不刷日志。
 - **`responses:` 日志同时打客户端与实际生效的推理强度**：原来只打请求体里的 `effort`，客户端不填时恒为 `None`，读起来像「没开思考」，实际按模型默认档（如 `high`）在跑。现在同时打 `effort=`（客户端）与 `upstream_effort=`（实际写进上游请求的值），两者用与构造请求体同一份解析逻辑。
